@@ -9,6 +9,8 @@ use App\Models\TicketType;
 use App\Models\IssuedTicket;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+use Exception;
 
 class OrderController extends Controller
 {
@@ -24,52 +26,71 @@ class OrderController extends Controller
                 'errors' => null
             ], 403);
         }
-        $request->validate([
-            'ticket_type_id' => 'required|exists:ticket_types,id',
-            'quantity' => 'required|integer|min:1'
-        ]);
-        $ticketType = TicketType::find($request->ticket_type_id);
-        if ($ticketType->available_quantity < $request->quantity) {
+
+        try {
+            $request->validate([
+                'ticket_type_id' => 'required|exists:ticket_types,id',
+                'quantity' => 'required|integer|min:1'
+            ]);
+            $ticketType = TicketType::find($request->ticket_type_id);
+            if ($ticketType->available_quantity < $request->quantity) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Not enough ticket quota',
+                    'statusCode' => 400,
+                    'data' => null,
+                    'errors' => null
+                ], 400);
+            }
+            DB::beginTransaction();
+            try {
+                $order = Order::create([
+                    'buyer_id' => $user->id,
+                    'total_amount' => $ticketType->price * $request->quantity
+                ]);
+                $orderItem = OrderItem::create([
+                    'order_id' => $order->id,
+                    'ticket_type_id' => $ticketType->id,
+                    'quantity' => $request->quantity,
+                    'price_per_ticket' => $ticketType->price
+                ]);
+                for ($i = 0; $i < $request->quantity; $i++) {
+                    IssuedTicket::create([
+                        'order_item_id' => $orderItem->id,
+                        'owner_id' => $user->id,
+                        'ticket_code' => (string) Str::uuid(),
+                        'is_used' => false
+                    ]);
+                }
+                $ticketType->available_quantity -= $request->quantity;
+                $ticketType->save();
+                DB::commit();
+                return response()->json([
+                    'status' => 'success',
+                    'message' => 'Order created, tickets issued',
+                    'statusCode' => 201,
+                    'data' => $order,
+                    'errors' => null
+                ], 201);
+            } catch (Exception $e) {
+                DB::rollBack();
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Order failed',
+                    'statusCode' => 500,
+                    'data' => null,
+                    'errors' => $e->getMessage()
+                ], 500);
+            }
+        } catch (ValidationException $e) {
             return response()->json([
                 'status' => 'error',
-                'message' => 'Not enough ticket quota',
-                'statusCode' => 400,
+                'message' => 'Validation failed',
+                'statusCode' => 422,
                 'data' => null,
-                'errors' => null
-            ], 400);
-        }
-        DB::beginTransaction();
-        try {
-            $order = Order::create([
-                'buyer_id' => $user->id,
-                'total_amount' => $ticketType->price * $request->quantity
-            ]);
-            $orderItem = OrderItem::create([
-                'order_id' => $order->id,
-                'ticket_type_id' => $ticketType->id,
-                'quantity' => $request->quantity,
-                'price_per_ticket' => $ticketType->price
-            ]);
-            for ($i = 0; $i < $request->quantity; $i++) {
-                IssuedTicket::create([
-                    'order_item_id' => $orderItem->id,
-                    'owner_id' => $user->id,
-                    'ticket_code' => (string) Str::uuid(),
-                    'is_used' => false
-                ]);
-            }
-            $ticketType->available_quantity -= $request->quantity;
-            $ticketType->save();
-            DB::commit();
-            return response()->json([
-                'status' => 'success',
-                'message' => 'Order created, tickets issued',
-                'statusCode' => 201,
-                'data' => $order,
-                'errors' => null
-            ], 201);
-        } catch (\Exception $e) {
-            DB::rollBack();
+                'errors' => $e->errors()
+            ], 422);
+        } catch (Exception $e) {
             return response()->json([
                 'status' => 'error',
                 'message' => 'Order failed',
@@ -92,14 +113,24 @@ class OrderController extends Controller
                 'errors' => null
             ], 403);
         }
-        $orders = Order::where('buyer_id', $user->id)->with('orderItems')->get();
-        return response()->json([
-            'status' => 'success',
-            'message' => 'Order history',
-            'statusCode' => 200,
-            'data' => $orders,
-            'errors' => null
-        ]);
+        try {
+            $orders = Order::where('buyer_id', $user->id)->with('orderItems')->get();
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Order history',
+                'statusCode' => 200,
+                'data' => $orders,
+                'errors' => null
+            ]);
+        } catch (Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to fetch order history',
+                'statusCode' => 500,
+                'data' => null,
+                'errors' => $e->getMessage()
+            ], 500);
+        }
     }
 
     public function myTickets(Request $request)
@@ -114,13 +145,23 @@ class OrderController extends Controller
                 'errors' => null
             ], 403);
         }
-        $tickets = IssuedTicket::where('owner_id', $user->id)->get();
-        return response()->json([
-            'status' => 'success',
-            'message' => 'My tickets',
-            'statusCode' => 200,
-            'data' => $tickets,
-            'errors' => null
-        ]);
+        try {
+            $tickets = IssuedTicket::where('owner_id', $user->id)->get();
+            return response()->json([
+                'status' => 'success',
+                'message' => 'My tickets',
+                'statusCode' => 200,
+                'data' => $tickets,
+                'errors' => null
+            ]);
+        } catch (Exception $e) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Failed to fetch tickets',
+                'statusCode' => 500,
+                'data' => null,
+                'errors' => $e->getMessage()
+            ], 500);
+        }
     }
 }
